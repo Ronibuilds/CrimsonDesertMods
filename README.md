@@ -1,7 +1,5 @@
 # Enhanced Flight & Mobility Mods for Crimson Desert
 
-**by Bambozu**
-
 A collection of ASI mods for Crimson Desert that overhaul aerial mobility and combat. Each mod is independent and fully compatible with the others.
 
 ---
@@ -76,13 +74,6 @@ Each mod writes a log to `bin64` (e.g. `EnhancedFlight.log`). Check the log firs
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
-## Credits
-
-- **Bambozu** — all mods in this repository
-- No code or assets from other mods are included
 
 ---
 
