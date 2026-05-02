@@ -7,13 +7,13 @@
 #include <cstdint>
 
 // Shared memory name (unique identifier for this game)
-#define SHARED_MEMORY_NAME "CrimsonDesert_PlayerBase_SharedMem_Bambozu"
+constexpr auto SHARED_MEMORY_NAME = "CrimsonDesert_PlayerBase_SharedMem_Bambozu";
 
 // Shared data structure
 #pragma pack(push, 1)
 struct SharedPlayerData {
     uintptr_t playerBase;           // Player object base pointer
-    DWORD     lastUpdateTick;       // GetTickCount() when last updated
+    ULONGLONG lastUpdateTick;       // GetTickCount64() when last updated
     char      hookOwnerName[64];    // Name of mod that installed the hook
     DWORD     version;              // Structure version (for compatibility)
     uintptr_t velHookAddress;       // Address where the vel hook was installed
@@ -110,7 +110,7 @@ public:
     void UpdatePlayerBase(uintptr_t playerBase) {
         if (pData) {
             pData->playerBase = playerBase;
-            pData->lastUpdateTick = GetTickCount();
+            pData->lastUpdateTick = GetTickCount64();
         }
     }
 
@@ -118,7 +118,7 @@ public:
     uintptr_t GetPlayerBase() {
         if (pData) {
             // Check if data is fresh (updated within last 100ms)
-            DWORD now = GetTickCount();
+            ULONGLONG now = GetTickCount64();
             if ((now - pData->lastUpdateTick) < 100) {
                 return pData->playerBase;
             }

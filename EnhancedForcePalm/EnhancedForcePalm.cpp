@@ -27,18 +27,20 @@ extern "C" {
 #include <hidsdi.h>
 #include <hidpi.h>
 #include <setupapi.h>
+#include <timeapi.h>
 }
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "Xinput.lib")
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "winmm.lib")
 
 // Shared memory for cross-mod compatibility
 #include "shared_player_base.h"
 static SharedPlayerBase g_sharedPlayerBase;
 
-// Global initialization guard to prevent double-initialization
-static std::atomic<bool> g_isInitialized{ false };
+// Named mutex: guards against two DLL images loaded from different paths.
+static HANDLE s_instanceMutex = NULL;
 
 // SafetyHook for proper hook chaining (compatibility with other mods)
 #include "safetyhook.hpp"
@@ -52,34 +54,34 @@ static inline T Clamp(T value, T lo, T hi) {
 // ============================================================
 //  OFFSETS
 // ============================================================
-#define VEL_Z_OFFSET 0x1B4
+constexpr auto VEL_Z_OFFSET = 0x1B4;
 
 // ============================================================
 //  XBOX BUTTON CONSTANTS
 // ============================================================
-#define BTN_R3  XINPUT_GAMEPAD_RIGHT_THUMB   // 128 (0x0080)
+constexpr auto BTN_R3 = XINPUT_GAMEPAD_RIGHT_THUMB;   // 128 (0x0080)
 
 // ============================================================
 //  PS5 DUALSENSE CONSTANTS & STRUCTURES
 // ============================================================
-#define DUALSENSE_VID 0x054C
-#define DUALSENSE_PID 0x0CE6  // DualSense (original)
-#define DUALSENSE_EDGE_PID 0x0DF2  // DualSense Edge
+constexpr auto DUALSENSE_VID = 0x054C;
+constexpr auto DUALSENSE_PID = 0x0CE6;  // DualSense (original)
+constexpr auto DUALSENSE_EDGE_PID = 0x0DF2;  // DualSense Edge
 
 // PS5 Button bit masks
-#define DS_BTN_SQUARE    0x0010
-#define DS_BTN_CROSS     0x0020
-#define DS_BTN_CIRCLE    0x0040
-#define DS_BTN_TRIANGLE  0x0080
-#define DS_BTN_L1        0x0100
-#define DS_BTN_R1        0x0200
-#define DS_BTN_L2        0x0400
-#define DS_BTN_R2        0x0800
-#define DS_BTN_CREATE    0x1000
-#define DS_BTN_OPTIONS   0x2000
-#define DS_BTN_L3        0x4000
-#define DS_BTN_R3        0x8000
-#define DS_BTN_PS        0x10000
+constexpr auto DS_BTN_SQUARE = 0x0010;
+constexpr auto DS_BTN_CROSS = 0x0020;
+constexpr auto DS_BTN_CIRCLE = 0x0040;
+constexpr auto DS_BTN_TRIANGLE = 0x0080;
+constexpr auto DS_BTN_L1 = 0x0100;
+constexpr auto DS_BTN_R1 = 0x0200;
+constexpr auto DS_BTN_L2 = 0x0400;
+constexpr auto DS_BTN_R2 = 0x0800;
+constexpr auto DS_BTN_CREATE = 0x1000;
+constexpr auto DS_BTN_OPTIONS = 0x2000;
+constexpr auto DS_BTN_L3 = 0x4000;
+constexpr auto DS_BTN_R3 = 0x8000;
+constexpr auto DS_BTN_PS = 0x10000;
 
 #pragma pack(push, 1)
 struct DualSenseInputUSB {
@@ -156,6 +158,7 @@ static std::atomic<bool>  g_forcePalmActive{ false };
 static ULONGLONG          g_forcePalmEndTime = 0;
 static std::string        g_iniPath;
 static ULONGLONG          g_lastIniModTime = 0;
+static float              g_boostBaselineVel = 0.0f;
 
 // Flight state detection
 static ULONGLONG          g_lastAirborneTime = 0;
@@ -176,6 +179,19 @@ static void Log(const std::string& msg) {
 // ============================================================
 //  DUALSENSE HID FUNCTIONS
 // ============================================================
+static const struct { uint32_t ds; WORD xi; } kBtnMap[] = {
+    { DS_BTN_CROSS,    XINPUT_GAMEPAD_A },
+    { DS_BTN_CIRCLE,   XINPUT_GAMEPAD_B },
+    { DS_BTN_SQUARE,   XINPUT_GAMEPAD_X },
+    { DS_BTN_TRIANGLE, XINPUT_GAMEPAD_Y },
+    { DS_BTN_R1,       XINPUT_GAMEPAD_RIGHT_SHOULDER },
+    { DS_BTN_L1,       XINPUT_GAMEPAD_LEFT_SHOULDER },
+    { DS_BTN_OPTIONS,  XINPUT_GAMEPAD_START },
+    { DS_BTN_CREATE,   XINPUT_GAMEPAD_BACK },
+    { DS_BTN_L3,       XINPUT_GAMEPAD_LEFT_THUMB },
+    { DS_BTN_R3,       XINPUT_GAMEPAD_RIGHT_THUMB },
+};
+
 static bool DualSense_Initialize() {
     if (g_dualSense.deviceHandle != INVALID_HANDLE_VALUE) {
         CloseHandle(g_dualSense.deviceHandle);
@@ -250,27 +266,16 @@ static bool DualSense_Initialize() {
 }
 
 static uint32_t DualSense_ParseButtons(const uint8_t* buttonData) {
-    uint32_t buttons = 0;
-    if (buttonData[0] & 0x10) buttons |= DS_BTN_SQUARE;
-    if (buttonData[0] & 0x20) buttons |= DS_BTN_CROSS;
-    if (buttonData[0] & 0x40) buttons |= DS_BTN_CIRCLE;
-    if (buttonData[0] & 0x80) buttons |= DS_BTN_TRIANGLE;
-    if (buttonData[1] & 0x01) buttons |= DS_BTN_L1;
-    if (buttonData[1] & 0x02) buttons |= DS_BTN_R1;
-    if (buttonData[1] & 0x04) buttons |= DS_BTN_L2;
-    if (buttonData[1] & 0x08) buttons |= DS_BTN_R2;
-    if (buttonData[1] & 0x10) buttons |= DS_BTN_CREATE;
-    if (buttonData[1] & 0x20) buttons |= DS_BTN_OPTIONS;
-    if (buttonData[1] & 0x40) buttons |= DS_BTN_L3;
-    if (buttonData[1] & 0x80) buttons |= DS_BTN_R3;
-    if (buttonData[2] & 0x01) buttons |= DS_BTN_PS;
-    return buttons;
+    uint32_t raw = buttonData[0] | (buttonData[1] << 8) | (buttonData[2] << 16);
+    // Bits already align to DS_BTN_* masks — return directly
+    return raw & (DS_BTN_SQUARE | DS_BTN_CROSS | DS_BTN_CIRCLE | DS_BTN_TRIANGLE | DS_BTN_L1 | DS_BTN_R1 | DS_BTN_L2 | DS_BTN_R2 | DS_BTN_CREATE | DS_BTN_OPTIONS | DS_BTN_L3 | DS_BTN_R3 | DS_BTN_PS);
+
 }
 
 static bool DualSense_ReadInput() {
     if (g_dualSense.deviceHandle == INVALID_HANDLE_VALUE) return false;
 
-    uint8_t buffer[128];
+    uint8_t buffer[128]{};
     DWORD bytesRead = 0;
 
     if (!ReadFile(g_dualSense.deviceHandle, buffer, sizeof(buffer), &bytesRead, NULL)) {
@@ -355,9 +360,9 @@ static bool ReadIniBool(const char* file, const char* section, const char* key, 
 }
 
 static bool GetFileModTime(const std::string& path, ULONGLONG* outTime) {
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
+    WIN32_FILE_ATTRIBUTE_DATA fileInfo{};
     if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fileInfo)) return false;
-    ULARGE_INTEGER uli;
+    ULARGE_INTEGER uli{};
     uli.LowPart = fileInfo.ftLastWriteTime.dwLowDateTime;
     uli.HighPart = fileInfo.ftLastWriteTime.dwHighDateTime;
     *outTime = uli.QuadPart;
@@ -474,33 +479,25 @@ static void PosHookCallback(safetyhook::Context& ctx) {
     if (ctx.rbx > 0x100000ULL)
         g_playerBase = static_cast<uintptr_t>(ctx.rbx);
 
-    __try {
-        if (!g_forcePalmActive.load()) return;
-        if (ctx.r13 < 0x100000) return;
+    if (g_forcePalmActive.load()) {
+        float currentVelY = ctx.xmm0.f32[1];
 
-        // QPC-based dt: hook fires once per physics substep. Same-frame substeps have
-        // near-zero elapsed time so they contribute nothing; only the first substep of
-        // each new frame carries the full frame dt — summing to the right total per frame.
-        static LARGE_INTEGER s_qpcFreq = { 0 };
-        static LARGE_INTEGER s_lastQPC = { 0 };
-        if (s_qpcFreq.QuadPart == 0)
-            QueryPerformanceFrequency(&s_qpcFreq);
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        float dt = 0.0f;
-        if (s_lastQPC.QuadPart != 0 && s_qpcFreq.QuadPart != 0) {
-            double elapsed = (double)(now.QuadPart - s_lastQPC.QuadPart) / (double)s_qpcFreq.QuadPart;
-            dt = (float)Clamp(elapsed, 0.0, 0.05);
+        // Define a "Soft Cap" for vertical speed to prevent physics snapping
+        // If the game thinks you are going too fast vertically, it teleports you to correct it.
+        const float maxSafeVerticalSpeed = 35.0f;
+
+        // Target is absolute, not relative to current velocity
+        float absoluteTarget = g_forcePalmBoostValue;
+
+        // Only boost if we haven't reached the target yet
+        if (currentVelY < absoluteTarget) {
+            float smoothFactor = 0.15f;
+            ctx.xmm0.f32[1] = std::min(
+                currentVelY + (absoluteTarget - currentVelY) * smoothFactor,
+                maxSafeVerticalSpeed
+            );
         }
-        s_lastQPC = now;
-        if (dt < 0.00001f) return;
-
-        // Override the vertical delta rather than adding to it — equivalent to the old
-        // "set velocity = boostValue" approach. Adding would stack with jump velocity,
-        // making the launch far too fast. Setting directly matches pre-patch behaviour.
-        ctx.xmm0.f32[1] = Clamp(g_forcePalmBoostValue * dt, -50.0f, 50.0f);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 static bool InstallPosHook(uint8_t* location) {
@@ -524,7 +521,6 @@ static void InputLoop() {
     bool     prevKeyDown = false;
     ULONGLONG lastIniPollMs = GetTickCount64();
     ULONGLONG lastPressTimeMs = 0; // triple-press tracking
-    int       pressCount = 0;
 
     while (true) {
         Sleep(1);
@@ -576,27 +572,10 @@ static void InputLoop() {
         if (hasDualSense) {
             // Map DualSense buttons to XInput-compatible format so a single Button= INI value
             // works for both Xbox and PS5 (Cross->A, Circle->B, Square->X, Triangle->Y, etc.)
-            if (dsButtons & DS_BTN_CROSS)    buttons |= XINPUT_GAMEPAD_A;
-            if (dsButtons & DS_BTN_CIRCLE)   buttons |= XINPUT_GAMEPAD_B;
-            if (dsButtons & DS_BTN_SQUARE)   buttons |= XINPUT_GAMEPAD_X;
-            if (dsButtons & DS_BTN_TRIANGLE) buttons |= XINPUT_GAMEPAD_Y;
-            if (dsButtons & DS_BTN_R1)       buttons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-            if (dsButtons & DS_BTN_L1)       buttons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
-            if (dsButtons & DS_BTN_OPTIONS)  buttons |= XINPUT_GAMEPAD_START;
-            if (dsButtons & DS_BTN_CREATE)   buttons |= XINPUT_GAMEPAD_BACK;
-            if (dsButtons & DS_BTN_L3)       buttons |= XINPUT_GAMEPAD_LEFT_THUMB;
-            if (dsButtons & DS_BTN_R3)       buttons |= XINPUT_GAMEPAD_RIGHT_THUMB;
-
-            if (dsJustPressed & DS_BTN_CROSS)    justPressed |= XINPUT_GAMEPAD_A;
-            if (dsJustPressed & DS_BTN_CIRCLE)   justPressed |= XINPUT_GAMEPAD_B;
-            if (dsJustPressed & DS_BTN_SQUARE)   justPressed |= XINPUT_GAMEPAD_X;
-            if (dsJustPressed & DS_BTN_TRIANGLE) justPressed |= XINPUT_GAMEPAD_Y;
-            if (dsJustPressed & DS_BTN_R1)       justPressed |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-            if (dsJustPressed & DS_BTN_L1)       justPressed |= XINPUT_GAMEPAD_LEFT_SHOULDER;
-            if (dsJustPressed & DS_BTN_OPTIONS)  justPressed |= XINPUT_GAMEPAD_START;
-            if (dsJustPressed & DS_BTN_CREATE)   justPressed |= XINPUT_GAMEPAD_BACK;
-            if (dsJustPressed & DS_BTN_L3)       justPressed |= XINPUT_GAMEPAD_LEFT_THUMB;
-            if (dsJustPressed & DS_BTN_R3)       justPressed |= XINPUT_GAMEPAD_RIGHT_THUMB;
+            for (auto& m : kBtnMap) {
+                if (dsButtons & m.ds) buttons |= m.xi;
+                if (dsJustPressed & m.ds) justPressed |= m.xi;
+            }
         }
         else if (hasXInput) {
             buttons = xinputButtons;
@@ -605,31 +584,25 @@ static void InputLoop() {
 
         bool inFlight = IsPlayerInFlight(nowMs);
 
-        // ---- FORCE PALM BOOST (R3) - fires when NOT in flight ----
+        // ---- FORCE PALM BOOST (R3) logic ----
         if (g_forcePalmBoostEnabled && !inFlight) {
             bool kbDown = g_forcePalmKey != 0 && (GetAsyncKeyState(g_forcePalmKey) & 0x8000) != 0;
             bool kbPressed = kbDown && !prevKeyDown;
             bool btnPressed = hasController && (justPressed & g_forcePalmButton);
 
             if (btnPressed || kbPressed) {
-                ULONGLONG gap = (lastPressTimeMs != 0) ? (nowMs - lastPressTimeMs) : ULLONG_MAX;
-                if (gap < 100ULL) {
-                    // bounce — ignore, keep current count and timestamp
-                }
-                else if (gap <= 500ULL) {
-                    pressCount++;
-                    lastPressTimeMs = nowMs;
-                    if (pressCount >= 3) {
-                        g_forcePalmActive.store(true);
-                        g_forcePalmEndTime = nowMs + (ULONGLONG)g_forcePalmBoostWindowMs;
-                        Log(std::string(kModBaseName) + ": force palm boost fired!");
-                        pressCount = 0;
-                        lastPressTimeMs = 0;
-                    }
+                if (nowMs - lastPressTimeMs < 250ULL) {
+                    // Capture velocity baseline at activation time
+                    if (g_playerBase != 0)
+                        g_boostBaselineVel = *reinterpret_cast<float*>(g_playerBase + VEL_Z_OFFSET);
+                    g_forcePalmActive.store(true);
+                    g_forcePalmEndTime = nowMs + (ULONGLONG)g_forcePalmBoostWindowMs;
+
+                    Log(std::string(kModBaseName) + ": force palm boost fired!");
+
+                    lastPressTimeMs = 0;
                 }
                 else {
-                    // gap > 500ms: too slow, start a fresh sequence
-                    pressCount = 1;
                     lastPressTimeMs = nowMs;
                 }
             }
@@ -638,8 +611,6 @@ static void InputLoop() {
         }
         else {
             prevKeyDown = false;
-            lastPressTimeMs = 0;
-            pressCount = 0; // clear pending sequence while in flight
         }
 
         // ---- BOOST WINDOW MANAGEMENT ----
@@ -728,18 +699,18 @@ static void ModMain() {
     DualSense_Initialize();
 
     Log(std::string(kModBaseName) + ": Ready!");
+    timeBeginPeriod(1);
     InputLoop();
+    timeEndPeriod(1);
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
-        // Prevent double-initialization (DLL can be loaded multiple times)
-        bool expected = false;
-        if (!g_isInitialized.compare_exchange_strong(expected, true)) {
-            // Already initialized - this is a subsequent DLL_PROCESS_ATTACH event, ignore it
+        s_instanceMutex = CreateMutexA(NULL, TRUE, "CrimsonDesert_ForcePalmBoost_Singleton");
+        if (s_instanceMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (s_instanceMutex) { CloseHandle(s_instanceMutex); s_instanceMutex = NULL; }
             return TRUE;
         }
-
         DisableThreadLibraryCalls(hModule);
         std::thread(ModMain).detach();
     }

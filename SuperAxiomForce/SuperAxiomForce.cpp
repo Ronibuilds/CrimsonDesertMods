@@ -14,7 +14,6 @@
 #include <fstream>
 #include <string>
 #include <cstdlib>
-#include <atomic>
 
 #pragma comment(lib, "psapi.lib")
 
@@ -43,7 +42,8 @@ static const float kFallbackPullSpeed = 1000.0f;
 // ============================================================
 static std::string        g_iniPath;
 static ULONGLONG          g_lastIniModTime = 0;
-static std::atomic<bool>  g_isInitialized{ false };
+// Named mutex: guards against two DLL images loaded from different paths.
+static HANDLE             s_instanceMutex = NULL;
 
 // Dynamically discovered addresses (nullptr = not found yet)
 static float* g_pAxiomRange = nullptr;
@@ -415,10 +415,11 @@ static void ModMain() {
 // ============================================================
 BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD ul_reason_for_call, LPVOID /*lpReserved*/) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
-        bool expected = false;
-        if (!g_isInitialized.compare_exchange_strong(expected, true))
-            return TRUE; // already initialised
-
+        s_instanceMutex = CreateMutexA(NULL, TRUE, "CrimsonDesert_SuperAxiomForce_Singleton");
+        if (s_instanceMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (s_instanceMutex) { CloseHandle(s_instanceMutex); s_instanceMutex = NULL; }
+            return TRUE;
+        }
         std::thread(ModMain).detach();
     }
     return TRUE;

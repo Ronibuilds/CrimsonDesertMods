@@ -17,6 +17,7 @@
 #endif
 #include <windows.h>
 #include <thread>
+#include <mutex>
 #include <fstream>
 #include <string>
 #include <cstdint>
@@ -40,8 +41,9 @@ extern "C" {
 #include "shared_player_base.h"
 static SharedPlayerBase g_sharedPlayerBase;
 
-// Global initialization guard to prevent double-initialization
-static std::atomic<bool> g_isInitialized{ false };
+// Named mutex: guards against two DLL images loaded from different paths.
+// A static atomic cannot see across separate DLL images (each has its own copy).
+static HANDLE s_instanceMutex = NULL;
 
 // SafetyHook for proper hook chaining (compatibility with other mods)
 #include "safetyhook.hpp"
@@ -59,31 +61,31 @@ static inline T Clamp(T value, T lo, T hi) {
 #define BTN_A   XINPUT_GAMEPAD_A                // 4096
 #define BTN_B   XINPUT_GAMEPAD_B                // 8192
 #define BTN_RB  XINPUT_GAMEPAD_RIGHT_SHOULDER   // 512
-#define BTN_LT  0x0800                          // Left Trigger (custom flag)
-#define BTN_RT  0x1000                          // Right Trigger (custom flag)
+constexpr auto BTN_LT = 0x0800;                          // Left Trigger (custom flag)
+constexpr auto BTN_RT = 0x1000;                          // Right Trigger (custom flag)
 
 // ============================================================
 //  PS5 DUALSENSE CONSTANTS & STRUCTURES
 // ============================================================
 // DualSense VID/PID
-#define DUALSENSE_VID 0x054C
-#define DUALSENSE_PID 0x0CE6  // DualSense (original)
-#define DUALSENSE_EDGE_PID 0x0DF2  // DualSense Edge
+constexpr auto DUALSENSE_VID = 0x054C;
+constexpr auto DUALSENSE_PID = 0x0CE6;  // DualSense (original)
+constexpr auto DUALSENSE_EDGE_PID = 0x0DF2;  // DualSense Edge
 
 // PS5 Button bit masks (matching DualSense HID report format)
-#define DS_BTN_SQUARE    0x0010   // 16
-#define DS_BTN_CROSS     0x0020   // 32
-#define DS_BTN_CIRCLE    0x0040   // 64
-#define DS_BTN_TRIANGLE  0x0080   // 128
-#define DS_BTN_L1        0x0100   // 256
-#define DS_BTN_R1        0x0200   // 512
-#define DS_BTN_L2        0x0400   // 1024
-#define DS_BTN_R2        0x0800   // 2048
-#define DS_BTN_CREATE    0x1000   // 4096 (Share/Create button)
-#define DS_BTN_OPTIONS   0x2000   // 8192
-#define DS_BTN_L3        0x4000   // 16384
-#define DS_BTN_R3        0x8000   // 32768
-#define DS_BTN_PS        0x10000  // PS button (in separate byte)
+constexpr auto DS_BTN_SQUARE = 0x0010;   // 16
+constexpr auto DS_BTN_CROSS = 0x0020;   // 32
+constexpr auto DS_BTN_CIRCLE = 0x0040;   // 64
+constexpr auto DS_BTN_TRIANGLE = 0x0080;   // 128
+constexpr auto DS_BTN_L1 = 0x0100;   // 256
+constexpr auto DS_BTN_R1 = 0x0200;   // 512
+constexpr auto DS_BTN_L2 = 0x0400;   // 1024
+constexpr auto DS_BTN_R2 = 0x0800;   // 2048
+constexpr auto DS_BTN_CREATE = 0x1000;   // 4096 (Share/Create button)
+constexpr auto DS_BTN_OPTIONS = 0x2000;   // 8192
+constexpr auto DS_BTN_L3 = 0x4000;   // 16384
+constexpr auto DS_BTN_R3 = 0x8000;   // 32768
+constexpr auto DS_BTN_PS = 0x10000;  // PS button (in separate byte)
 
 // DualSense input report structure (USB mode - Report ID 0x01)
 #pragma pack(push, 1)
@@ -138,7 +140,7 @@ static DualSenseState g_dualSense = { INVALID_HANDLE_VALUE, false, false, 0, 0, 
 //  VELOCITY OFFSETS
 // ============================================================
 // 1.04.01: velocity is now a packed float4 {X, Z_height, Y, W} at entity+0x1B0
-#define VEL_Z_OFFSET   0x1B4  // vertical velocity (second float of packed vector at entity+0x1B0)
+constexpr auto VEL_Z_OFFSET = 0x1B4;  // vertical velocity (second float of packed vector at entity+0x1B0)
 
 // ============================================================
 //  FLIGHT STATE DETECTION
@@ -215,7 +217,9 @@ static std::atomic<bool>  g_horizontalBoostActive{ false };
 static std::atomic<float> g_aerialRollBoostMultiplier{ 1.0f }; // Current boost multiplier
 static ULONGLONG          g_aerialRollBoostEndTime = 0;        // When boost ends
 static std::string        g_iniPath;
+static std::string        g_logPath;
 static ULONGLONG          g_lastIniModTime = 0;
+static bool               s_posHookLogged = false;
 
 // Smooth acceleration/deceleration state (horizontal and aerial only)
 static std::atomic<float> g_currentHorizontalMult{ 1.0f };     // Current horizontal multiplier (smoothed)
@@ -262,9 +266,56 @@ static std::atomic<float> g_naturalVelZ{ 0.0f };
 // ============================================================
 //  LOGGING
 // ============================================================
+static HANDLE g_logHandle = INVALID_HANDLE_VALUE;
+static std::mutex g_logMutex;
+
+static void InitLog() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+
+    if (g_logHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_logHandle);
+    }
+
+    // FILE_APPEND_DATA automatically pushes writes to the end of the file atomically
+    g_logHandle = CreateFileA(
+        g_logPath.empty() ? kLogFileName : g_logPath.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+}
+
+// __declspec(noinline) prevents MSVC from inlining this into __try blocks, 
+// strictly avoiding C2712 compilation errors while allowing safe mutex locking.
+__declspec(noinline) static void Log(const char* msg) {
+    if (g_logHandle == INVALID_HANDLE_VALUE) return;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    char buffer[2048];
+    // _TRUNCATE ensures the buffer is safely null-terminated even if the message is too long
+    int len = _snprintf_s(buffer, sizeof(buffer), _TRUNCATE, "[%02d:%02d:%02d.%03d] [%s]: %s\n",
+        st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, kModBaseName, msg);
+
+    if (len < 0) {
+        len = (int)strlen(buffer); // Fallback length if truncation occurred
+    }
+
+    if (len > 0) {
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        DWORD written = 0;
+        WriteFile(g_logHandle, buffer, static_cast<DWORD>(len), &written, nullptr);
+        FlushFileBuffers(g_logHandle); // Force flush to disk instantly to trace crashes
+    }
+}
+
+// std::string convenience overload
 static void Log(const std::string& msg) {
-    std::ofstream f(kLogFileName, std::ios::app);
-    f << msg << "\n";
+    Log(msg.c_str());
 }
 
 // ============================================================
@@ -288,7 +339,7 @@ static bool DualSense_Initialize() {
         return false;
     }
 
-    SP_DEVICE_INTERFACE_DATA deviceInterfaceData;
+    SP_DEVICE_INTERFACE_DATA deviceInterfaceData{};
     deviceInterfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
 
     for (DWORD i = 0; SetupDiEnumDeviceInterfaces(deviceInfoSet, nullptr, &hidGuid, i, &deviceInterfaceData); i++) {
@@ -307,7 +358,7 @@ static bool DualSense_Initialize() {
                 nullptr, OPEN_EXISTING, 0, nullptr);
 
             if (hDevice != INVALID_HANDLE_VALUE) {
-                HIDD_ATTRIBUTES attrib;
+                HIDD_ATTRIBUTES attrib{};
                 attrib.Size = sizeof(HIDD_ATTRIBUTES);
 
                 if (HidD_GetAttributes(hDevice, &attrib)) {
@@ -481,11 +532,11 @@ static bool ReadIniBool(const char* file, const char* section, const char* key, 
 
 // Get file last modified time
 static bool GetFileModTime(const std::string& path, ULONGLONG* outTime) {
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
+    WIN32_FILE_ATTRIBUTE_DATA fileInfo{};
     if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fileInfo)) {
         return false;
     }
-    ULARGE_INTEGER uli;
+    ULARGE_INTEGER uli{};
     uli.LowPart = fileInfo.ftLastWriteTime.dwLowDateTime;
     uli.HighPart = fileInfo.ftLastWriteTime.dwHighDateTime;
     *outTime = uli.QuadPart;
@@ -570,12 +621,18 @@ static uint8_t* PatternScan(const uint8_t* pattern, const char* mask, size_t len
 //  Uses SafetyHook for compatibility with other mods
 // ============================================================
 static void VelHookCallback(safetyhook::Context& ctx) {
-    uintptr_t playerBase = ctx.rax;
+    uintptr_t entityBase = ctx.rax;
 
-    if (playerBase > 0x100000) {
-        // Bug 3: detect playerBase change (happens on save/load — new entity address).
-        // Reset all flight state so the stabilization period starts fresh.
-        if (playerBase != g_lastSeenPlayerBase && g_lastSeenPlayerBase != 0) {
+    if (entityBase > 0x100000) {
+        // Grab the 100% confirmed player address from our PosHook
+        uintptr_t knownPlayer = g_capturedPlayerBase.load();
+
+        // This is a generic engine function. If this entity isn't our player, ignore it completely!
+        if (knownPlayer != 0 && entityBase != knownPlayer) {
+            return;
+        }
+
+        if (entityBase != g_lastSeenPlayerBase && g_lastSeenPlayerBase != 0) {
             g_playerBaseChangeMs = GetTickCount64();
             g_isInFlight.store(false);
             g_wasAirborne = false;
@@ -584,9 +641,9 @@ static void VelHookCallback(safetyhook::Context& ctx) {
             g_flightCandidateSinceMs = 0;
             g_groundedSinceMs = 0;
         }
-        g_lastSeenPlayerBase = playerBase;
-        g_playerBase = playerBase;
-        g_sharedPlayerBase.UpdatePlayerBase(playerBase);
+        g_lastSeenPlayerBase = entityBase;
+        g_playerBase = entityBase;
+        g_sharedPlayerBase.UpdatePlayerBase(entityBase);
     }
 }
 
@@ -615,6 +672,17 @@ static bool InstallVelHook(uint8_t* location) {
 static void PosHookCallback(safetyhook::Context& ctx) {
     if (ctx.rbx > 0x100000ULL)
         g_capturedPlayerBase.store(ctx.rbx);
+
+    if (!s_posHookLogged) {
+        s_posHookLogged = true;
+        char buf[128];
+        sprintf_s(buf, "PosHook rbx=0x%llX r13=0x%llX rax=0x%llX rcx=0x%llX",
+            (unsigned long long)ctx.rbx,
+            (unsigned long long)ctx.r13,
+            (unsigned long long)ctx.rax,
+            (unsigned long long)ctx.rcx);
+        Log(buf);
+    }
 
     __try {
         // r13 contains position pointer
@@ -1336,6 +1404,14 @@ static void InputLoop() {
 //  ENTRY POINT
 // ============================================================
 static void ModMain() {
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    g_iniPath = std::string(exePath);
+    g_iniPath = g_iniPath.substr(0, g_iniPath.rfind('\\')) + std::string("\\") + kModBaseName + ".ini";
+	g_logPath = g_iniPath.substr(0, g_iniPath.rfind('\\')) + std::string("\\") + kModBaseName + ".log";
+
+    InitLog();
+
     Log(std::string(kModBaseName) + ": waiting for game to load...");
     Sleep(15000);
 
@@ -1343,11 +1419,6 @@ static void ModMain() {
     if (!g_sharedPlayerBase.Initialize(kModBaseName)) {
         Log(std::string(kModBaseName) + ": WARNING - cross-mod sync unavailable");
     }
-
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-    g_iniPath = std::string(exePath);
-    g_iniPath = g_iniPath.substr(0, g_iniPath.rfind('\\')) + std::string("\\") + kModBaseName + ".ini";
 
     // Load all configuration
     ReloadIniValues();
@@ -1367,15 +1438,16 @@ static void ModMain() {
     // becomes the shared memory owner, and then EnhancedFlight (as companion) waits for a
     // velHookAddress that nobody will ever publish.
     if (g_sharedPlayerBase.ClaimVelHook()) {
-        // 1.04.01: Hook a player pointer capture site instead of the velZ write.
-        // At hook_offset +17 from primary match (or +13 from fallback), rax = player entity.
+        // 1.05.00: Hook a player pointer capture site instead of the velZ write.
         static const uint8_t velPrimaryPattern[] = {
-            0x49, 0x8B, 0x7D, 0x18,
-            0x49, 0x8B, 0x44, 0x24, 0x40,
-            0x48, 0x8B, 0x40, 0x68,
-            0x48, 0x8B, 0x70, 0x20
+            0xC5, 0xF8, 0x11, 0x88, 0xB0, 0x01, 0x00, 0x00, // vmovups [rax+000001B0],xmm1
+            0xC5, 0xC2, 0x59, 0x8D, 0x00, 0x00, 0x00, 0x00, // vmulss xmm1,xmm7,[rbp+000000E4] (wildcarded offset)
+            0xC5, 0xFA, 0x11, 0x8F, 0x00, 0x00, 0x00, 0x00, // vmovss [rdi+00000368],xmm1 (wildcarded offset)
+            0x48, 0x8D, 0x95, 0x00, 0x00, 0x00, 0x00,       // lea rdx,[rbp+000000E0] (wildcarded offset)
+            0x48, 0x8B, 0xCF                                // mov rcx,rdi
         };
-        static const char velPrimaryMask[] = "xxxxxxxxxxxxxxxxx";
+        // 'x' means exact match, '?' means wildcard (ignore the changing numbers)
+        static const char velPrimaryMask[] = "xxxxxxxxxxxx????xxxx????xxx????xxx";
         static const uint8_t velFallbackPattern[] = {
             0x49, 0x8B, 0x44, 0x24, 0x40,
             0x48, 0x8B, 0x40, 0x68,
@@ -1384,17 +1456,11 @@ static void ModMain() {
         static const char velFallbackMask[] = "xxxxxxxxxxxxx";
 
         uint8_t* velLoc = PatternScan(velPrimaryPattern, velPrimaryMask, sizeof(velPrimaryPattern));
-        int hookOffset = 17;
-        if (!velLoc) {
-            velLoc = PatternScan(velFallbackPattern, velFallbackMask, sizeof(velFallbackPattern));
-            hookOffset = 13;
-        }
 
         if (!velLoc) {
             Log(std::string(kModBaseName) + ": ERROR - game version not supported, flight detection inactive.");
         }
         else {
-            velLoc += hookOffset;
             if (InstallVelHook(velLoc)) {
                 g_sharedPlayerBase.SetHookAddress(reinterpret_cast<uintptr_t>(velLoc));
             }
@@ -1463,19 +1529,25 @@ static void ModMain() {
     // Initialize DualSense controller support
     DualSense_Initialize();
 
+    if (!g_posHook) {
+        Log(std::string(kModBaseName) + ": CRITICAL - Core hooks failed. Mod is disabled until updated.");
+        return; // Kills the background thread cleanly
+    }
+
     Log(std::string(kModBaseName) + ": Ready!");
     InputLoop();
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
-        // Prevent double-initialization (DLL can be loaded multiple times)
-        bool expected = false;
-        if (!g_isInitialized.compare_exchange_strong(expected, true)) {
-            // Already initialized - this is a subsequent DLL_PROCESS_ATTACH event, ignore it
+        // CreateMutex with bInitialOwner=TRUE: first caller succeeds, subsequent callers
+        // get ERROR_ALREADY_EXISTS even across separate DLL images loaded from different paths.
+        s_instanceMutex = CreateMutexA(NULL, TRUE, "CrimsonDesert_EnhancedFlight_Singleton");
+        if (s_instanceMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS) {
+            if (s_instanceMutex) { CloseHandle(s_instanceMutex); s_instanceMutex = NULL; }
             return TRUE;
         }
-
+        // Keep s_instanceMutex open for the DLL's lifetime so the guard stays active.
         DisableThreadLibraryCalls(hModule);
         std::thread(ModMain).detach();
     }
