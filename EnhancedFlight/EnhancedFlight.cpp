@@ -383,8 +383,8 @@ static bool DualSense_Initialize() {
                         free(detailData);
                         SetupDiDestroyDeviceInfoList(deviceInfoSet);
 
-                        Log(std::string(kModBaseName) + ": DualSense controller detected (" +
-                            (g_dualSense.isBluetooth ? "Bluetooth" : "USB") + ")");
+                        Log("DualSense controller detected (" +
+                            std::string(g_dualSense.isBluetooth ? "Bluetooth" : "USB") + ")");
                         return true;
                     }
                 }
@@ -583,8 +583,8 @@ static void ReloadIniValues() {
     g_wingRetractButton = ReadIniInt(g_iniPath.c_str(), "WingRetract", "Button", 0);
     g_wingRetractKey = ReadIniInt(g_iniPath.c_str(), "WingRetract", "Key", 0x20);
 
-    Log(std::string(kModBaseName) + ": INI reloaded - " +
-        "Ascend=" + (g_ascendEnabled ? "ON" : "OFF") +
+    Log("INI reloaded - " +
+        std::string("Ascend=") + (g_ascendEnabled ? "ON" : "OFF") +
         " Descend=" + (g_descendEnabled ? "ON" : "OFF") +
         " Horizontal=" + (g_horizontalEnabled ? "ON" : "OFF") +
         " (Toggle=" + (g_horizontalUseToggle ? "YES" : "NO") + ")" +
@@ -656,12 +656,12 @@ static bool InstallVelHook(uint8_t* location) {
     );
 
     if (!hook_result) {
-        Log(std::string(kModBaseName) + ": WARNING - secondary detection unavailable");
+        Log("WARNING - secondary detection unavailable");
         return false;
     }
 
     g_velHook = std::move(*hook_result);
-    Log(std::string(kModBaseName) + ": detection active");
+    Log("detection active");
     return true;
 }
 
@@ -772,12 +772,12 @@ static bool InstallPosHook(uint8_t* location) {
     );
 
     if (!hook_result) {
-        Log(std::string(kModBaseName) + ": ERROR - speed boost unavailable");
+        Log("ERROR - speed boost unavailable");
         return false;
     }
 
     g_posHook = std::move(*hook_result);
-    Log(std::string(kModBaseName) + ": speed boost active");
+    Log("speed boost active");
     return true;
 }
 
@@ -1116,7 +1116,7 @@ static void InputLoop() {
                 if (toggled) {
                     bool newState = !g_horizontalBoostActive.load();
                     g_horizontalBoostActive.store(newState);
-                    Log(std::string(kModBaseName) + ": horizontal boost " + std::string(newState ? "ON" : "OFF"));
+                    Log("horizontal boost " + std::string(newState ? "ON" : "OFF"));
                 }
             }
             else {
@@ -1334,7 +1334,7 @@ static void InputLoop() {
                 else {
                     g_aerialRampStartMs = nowMs;
                 }
-                Log(std::string(kModBaseName) + ": aerial roll boost activated!");
+                Log("aerial roll boost activated!");
             }
 
             prevAerialKeyDown = kbDown;
@@ -1412,12 +1412,12 @@ static void ModMain() {
 
     InitLog();
 
-    Log(std::string(kModBaseName) + ": waiting for game to load...");
+    Log("waiting for game to load...");
     Sleep(15000);
 
     // Initialize shared memory (we'll install the hook since we're flight mod)
     if (!g_sharedPlayerBase.Initialize(kModBaseName)) {
-        Log(std::string(kModBaseName) + ": WARNING - cross-mod sync unavailable");
+        Log("WARNING - cross-mod sync unavailable");
     }
 
     // Load all configuration
@@ -1425,7 +1425,7 @@ static void ModMain() {
 
     GetFileModTime(g_iniPath, &g_lastIniModTime);
 
-    Log(std::string(kModBaseName) + ": config loaded (live reload enabled)");
+    Log("config loaded (live reload enabled)");
 
     // Install vel hook.
     // Owner:    scan for the pattern, install, save address to shared memory.
@@ -1438,7 +1438,7 @@ static void ModMain() {
     // becomes the shared memory owner, and then EnhancedFlight (as companion) waits for a
     // velHookAddress that nobody will ever publish.
     if (g_sharedPlayerBase.ClaimVelHook()) {
-        // 1.05.00: Hook a player pointer capture site instead of the velZ write.
+        // 1.05.00 Primary Pattern
         static const uint8_t velPrimaryPattern[] = {
             0xC5, 0xF8, 0x11, 0x88, 0xB0, 0x01, 0x00, 0x00, // vmovups [rax+000001B0],xmm1
             0xC5, 0xC2, 0x59, 0x8D, 0x00, 0x00, 0x00, 0x00, // vmulss xmm1,xmm7,[rbp+000000E4] (wildcarded offset)
@@ -1446,8 +1446,9 @@ static void ModMain() {
             0x48, 0x8D, 0x95, 0x00, 0x00, 0x00, 0x00,       // lea rdx,[rbp+000000E0] (wildcarded offset)
             0x48, 0x8B, 0xCF                                // mov rcx,rdi
         };
-        // 'x' means exact match, '?' means wildcard (ignore the changing numbers)
         static const char velPrimaryMask[] = "xxxxxxxxxxxx????xxxx????xxx????xxx";
+
+        // Legacy Fallback Pattern
         static const uint8_t velFallbackPattern[] = {
             0x49, 0x8B, 0x44, 0x24, 0x40,
             0x48, 0x8B, 0x40, 0x68,
@@ -1456,13 +1457,21 @@ static void ModMain() {
         static const char velFallbackMask[] = "xxxxxxxxxxxxx";
 
         uint8_t* velLoc = PatternScan(velPrimaryPattern, velPrimaryMask, sizeof(velPrimaryPattern));
+        int hookOffset = 0; // Primary hook is at the start (offset 0)
+
+        if (!velLoc) {
+            // Primary failed, try fallback
+            velLoc = PatternScan(velFallbackPattern, velFallbackMask, sizeof(velFallbackPattern));
+            hookOffset = 13; // Fallback requires a 13-byte offset
+        }
 
         if (!velLoc) {
             Log(std::string(kModBaseName) + ": ERROR - game version not supported, flight detection inactive.");
         }
         else {
-            if (InstallVelHook(velLoc)) {
-                g_sharedPlayerBase.SetHookAddress(reinterpret_cast<uintptr_t>(velLoc));
+            uint8_t* finalHookAddr = velLoc + hookOffset;
+            if (InstallVelHook(finalHookAddr)) {
+                g_sharedPlayerBase.SetHookAddress(reinterpret_cast<uintptr_t>(finalHookAddr));
             }
         }
     }
@@ -1478,7 +1487,7 @@ static void ModMain() {
             InstallVelHook(reinterpret_cast<uint8_t*>(hookAddr));
         }
         else {
-            Log(std::string(kModBaseName) + ": WARNING - secondary detection unavailable");
+            Log("WARNING - secondary detection unavailable");
         }
     }
 
@@ -1507,7 +1516,7 @@ static void ModMain() {
             }
         }
         else {
-            Log(std::string(kModBaseName) + ": WARNING - speed boost unavailable, game version may not be supported.");
+            Log("WARNING - speed boost unavailable, game version may not be supported.");
         }
     }
     else {
@@ -1522,7 +1531,7 @@ static void ModMain() {
             InstallPosHook(reinterpret_cast<uint8_t*>(posAddr));
         }
         else {
-            Log(std::string(kModBaseName) + ": WARNING - speed boost unavailable, game version may not be supported.");
+            Log("WARNING - speed boost unavailable, game version may not be supported.");
         }
     }
 
@@ -1530,11 +1539,11 @@ static void ModMain() {
     DualSense_Initialize();
 
     if (!g_posHook) {
-        Log(std::string(kModBaseName) + ": CRITICAL - Core hooks failed. Mod is disabled until updated.");
+        Log("CRITICAL - Core hooks failed. Mod is disabled until updated.");
         return; // Kills the background thread cleanly
     }
 
-    Log(std::string(kModBaseName) + ": Ready!");
+    Log("Ready!");
     InputLoop();
 }
 
