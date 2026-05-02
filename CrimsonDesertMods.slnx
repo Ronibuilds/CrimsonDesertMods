@@ -1,0 +1,18 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/SolutionItems/">
+    <File Path=".gitignore" />
+    <File Path="CONTRIBUTING.md" />
+    <File Path="enhanced-flight.md" />
+    <File Path="enhanced-force-palm.md" />
+    <File Path="LICENSE" />
+    <File Path="README.md" />
+    <File Path="super-axiom-force.md" />
+  </Folder>
+  <Project Path="EnhancedFlight/EnhancedFlight.vcxproj" Id="920c5dcf-ba2f-4faf-9a15-145c6f4048d2" />
+  <Project Path="EnhancedForcePalm/EnhancedForcePalm.vcxproj" Id="6c9aaa95-a9f3-4c7a-83ba-da846c08e2c3" />
+  <Project Path="Shared/Shared.vcxitems" Id="70aa7524-44b9-42b7-8c12-3a26847545dc" />
+  <Project Path="SuperAxiomForce/SuperAxiomForce.vcxproj" Id="56f2b44d-ae75-4adc-bc4f-6fa4d25e0e40" />
+</Solution>

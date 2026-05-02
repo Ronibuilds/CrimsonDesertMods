@@ -67,3 +67,8 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+/.vs
+/.vscode
+Debug/
+Release/
+/enc_temp_folder
