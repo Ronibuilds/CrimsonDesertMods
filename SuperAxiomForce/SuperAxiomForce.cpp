@@ -25,11 +25,11 @@ static const char* kLogFile = "SuperAxiomForce.log";
 static const char* kIniSection = "AxiomForce";
 
 // Fallback offsets (used if pattern scanning fails)
-static const uintptr_t kAxiomRangeOffset_Fallback = 0x5E05128;  // confirmed latest
-static const uintptr_t kAxiomPullSpeedOffset_Fallback = 0x5E05C68;  // confirmed latest
-static const uintptr_t kAerialManeuverOffset_Fallback = 0x0EA5DEE;  // confirmed 1.04.01
-static const uintptr_t kReelDurationOffset_Fallback = 0x420705;   // confirmed 1.04.01
-static const uintptr_t kPropellDurationOffset_Fallback = 0x4209A0;   // confirmed 1.04.01
+static const uintptr_t kAxiomRangeOffset_Fallback        = 0x5DE8ED8;  // confirmed 1.05.01
+static const uintptr_t kAxiomPullSpeedOffset_Fallback     = 0x5DE9A18;  // confirmed 1.05.01
+static const uintptr_t kAerialManeuverOffset_Fallback     = 0xE6D20F;   // confirmed 1.05.01
+static const uintptr_t kReelDurationOffset_Fallback       = 0x4428DC;   // confirmed 1.05.01 (unchanged from 1.05.00)
+static const uintptr_t kPropellDurationOffset_Fallback    = 0x442B7E;   // confirmed 1.05.01 (unchanged from 1.05.00)
 
 // Default values
 static const float kDefaultRange = 20.0f;
@@ -123,9 +123,9 @@ static void DiscoverAddresses() {
 
     Log("Initializing mod features...");
 
-    // Pattern 1: Straight pull feature (updated bytes for 1.04.01)
+    // Pattern 1: Straight pull feature (updated bytes for 1.05.01)
     {
-        static const uint8_t pattern[] = { 0xE8, 0x4D, 0xD0, 0xFF, 0xFF };
+        static const uint8_t pattern[] = { 0xE8, 0x4C, 0x31, 0x49, 0xFF };
         static const char mask[] = "xxxxx";
 
         uint8_t* loc = PatternScan(pattern, mask, sizeof(pattern));
@@ -176,8 +176,8 @@ static bool ApplyStraightPull(bool enabled) {
 
     uint8_t* pCall = g_pAerialManeuver;
 
-    // Expected original bytes: E8 4D D0 FF FF (call instruction, updated 1.04.01)
-    uint8_t expectedBytes[5] = { 0xe8, 0x4d, 0xd0, 0xff, 0xff };
+    // Expected original bytes: E8 4C 31 49 FF (call instruction, updated 1.05.01)
+    uint8_t expectedBytes[5] = { 0xe8, 0x4c, 0x31, 0x49, 0xff };
     // NOPs to disable the call
     uint8_t nops[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
 
