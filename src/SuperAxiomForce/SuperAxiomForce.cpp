@@ -17,6 +17,8 @@
 #include <atomic>
 #include <vector>
 #include <sstream>
+#include <cmath>
+#include <cstddef>
 
 #pragma comment(lib, "psapi.lib")
 
@@ -301,7 +303,7 @@ static uintptr_t resolve_addresses(const AddressCandidate* candidates, size_t cs
                 ss << "AxiomRange address resolved: 0x" << std::hex << axiomRangeAddress << " (Value: " << *axiomRangePtr << ")";
                 Log(ss.str());
                 if (*axiomRangePtr > 100000.0f || *axiomRangePtr < -100000.0f || std::isnan(*axiomRangePtr)) {
-                    ss.clear();
+                    ss.str("");
                     ss << "AxiomRange safety check failed. Value: " << *axiomRangePtr;
                     Log(ss.str());
                     return false;
@@ -331,7 +333,7 @@ static bool resolve_axiom_pull_speed(std::byte* startAddress, DWORD regionSize) 
             ss << "AxiomPullSpeed address resolved: 0x" << std::hex << pullSpeedAddress << " (Value: " << *axiomPullSpeedPtr << ")";
             Log(ss.str());
             if (*axiomPullSpeedPtr < -100000.0f || *axiomPullSpeedPtr > 100000.0f || std::isnan(*axiomPullSpeedPtr)) {
-                ss.clear();
+                ss.str("");
                 ss << "AxiomPullSpeed safety check failed. Value: " << *axiomPullSpeedPtr;
                 Log(ss.str());
                 return false;
@@ -379,12 +381,12 @@ static bool resolve_reel_duration(std::byte* startAddress, DWORD regionSize) {
         if (gReel.success) {
             std::stringstream ss;
             if (*(uint8_t*)reelAddress != 0x76 || *(uint8_t*)(reelAddress + 1) != 0x43) {
-                ss.clear();
+                ss.str("");
                 ss << "ReelDuration pattern found but byte check failed. Expected 0x76 0x43, found 0x" << std::hex << *(uint8_t*)reelAddress << " 0x" << *(uint8_t*)(reelAddress + 1) << ". Address may be incorrect.";
                 Log(ss.str());
             }
             g_pReelDuration = reinterpret_cast<uint8_t*>(reelAddress);
-            ss.clear();
+            ss.str("");
             ss << "ReelDuration address resolved: 0x" << std::hex << reelAddress;
             Log(ss.str());
             return true;
@@ -523,8 +525,6 @@ static bool ApplyInstantAxiom(bool enabled) {
     // Propell: jbe +0x06 -> jmp +0x06
     uint8_t propOrig[2] = { 0x76, 0x06 };
     uint8_t propPatch[2] = { 0xEB, 0x06 };
-
-    DWORD oldProtect = 0;
 
     if (enabled) {
         if (memcmp(g_pReelDuration, reelPatch, 2) == 0) {
