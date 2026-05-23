@@ -15,7 +15,6 @@
 #include <string>
 #include <cstdlib>
 #include <atomic>
-#include <span> // C++20
 #include <vector>
 #include <sstream>
 
@@ -269,9 +268,10 @@ static uintptr_t find_pattern(const std::byte* base, std::size_t size, const cha
     return 0;
 }
 
-static uintptr_t resolve_addresses(std::span<const AddressCandidate> candidates, const std::byte* base, std::size_t size) {
-    for (const auto& c : candidates)
+static uintptr_t resolve_addresses(const AddressCandidate* candidates, size_t csize, const std::byte* base, std::size_t size) {
+    for (size_t i = 0; i < size; ++i)
     {
+		auto& c = candidates[i];
         const uintptr_t hit = find_pattern(base, size, c.pattern);
         if (hit) {
             return hit + c.disp_offset;
@@ -288,38 +288,38 @@ static uintptr_t resolve_addresses(std::span<const AddressCandidate> candidates,
 // ============================================================
 //  ADDRESS DISCOVERY
 // ============================================================
-static bool resolve_axiom_range(std::byte* startAddress, DWORD regionSize) {
-    const auto axiomRangeAddress = resolve_addresses(kAxiomRangeCandidate, startAddress, regionSize);
-    if (!axiomRangeAddress) {
-        Log("ERROR: AxiomRange address not resolved");
-    }
-    else {
-        MemoryGuard dataGuard((LPVOID)axiomRangeAddress, sizeof(float));
-        if (dataGuard.success) {
-            float* axiomRangePtr = reinterpret_cast<float*>(axiomRangeAddress);
-            std::stringstream ss;
-            ss << "AxiomRange address resolved: 0x" << std::hex << axiomRangeAddress << " (Value: " << *axiomRangePtr << ")";
-            Log(ss.str());
-            if (*axiomRangePtr > 100000.0f || *axiomRangePtr < -100000.0f || std::isnan(*axiomRangePtr)) {
-                ss.clear();
-                ss << "AxiomRange safety check failed. Value: " << *axiomRangePtr;
-                Log(ss.str());
-                return false;
-            }
-            g_pAxiomRange = axiomRangePtr;
-            Log("AxiomRange pointer set.");
-            return true;
+    static bool resolve_axiom_range(std::byte* startAddress, DWORD regionSize) {
+        const auto axiomRangeAddress = resolve_addresses(kAxiomRangeCandidate, std::size(kAxiomRangeCandidate), startAddress, regionSize);
+        if (!axiomRangeAddress) {
+            Log("ERROR: AxiomRange address not resolved");
         }
         else {
-            Log("Failed to set memory protection for AxiomRange address.");
+            MemoryGuard dataGuard((LPVOID)axiomRangeAddress, sizeof(float));
+            if (dataGuard.success) {
+                float* axiomRangePtr = reinterpret_cast<float*>(axiomRangeAddress);
+                std::stringstream ss;
+                ss << "AxiomRange address resolved: 0x" << std::hex << axiomRangeAddress << " (Value: " << *axiomRangePtr << ")";
+                Log(ss.str());
+                if (*axiomRangePtr > 100000.0f || *axiomRangePtr < -100000.0f || std::isnan(*axiomRangePtr)) {
+                    ss.clear();
+                    ss << "AxiomRange safety check failed. Value: " << *axiomRangePtr;
+                    Log(ss.str());
+                    return false;
+                }
+                g_pAxiomRange = axiomRangePtr;
+                Log("AxiomRange pointer set.");
+                return true;
+            }
+            else {
+                Log("Failed to set memory protection for AxiomRange address.");
+            }
         }
+
+        return false;
     }
 
-    return false;
-}
-
 static bool resolve_axiom_pull_speed(std::byte* startAddress, DWORD regionSize) {
-    const auto pullSpeedAddress = resolve_addresses(kAxiomPullSpeedCandidate, startAddress, regionSize);
+    const auto pullSpeedAddress = resolve_addresses(kAxiomPullSpeedCandidate, std::size(kAxiomPullSpeedCandidate), startAddress, regionSize);
     if (!pullSpeedAddress) {
         Log("AxiomPullSpeed address not resolved");
     }
@@ -348,7 +348,7 @@ static bool resolve_axiom_pull_speed(std::byte* startAddress, DWORD regionSize) 
 }
 
 static bool resolve_straight_pull(std::byte* startAddress, DWORD regionSize) {
-    const auto straightPullAddress = resolve_addresses(kAxiomStraightPullCandidate, startAddress, regionSize);
+    const auto straightPullAddress = resolve_addresses(kAxiomStraightPullCandidate, std::size(kAxiomStraightPullCandidate), startAddress, regionSize);
     if (!straightPullAddress) {
         Log("StraightPull address not resolved");
     }
@@ -370,7 +370,7 @@ static bool resolve_straight_pull(std::byte* startAddress, DWORD regionSize) {
 }
 
 static bool resolve_reel_duration(std::byte* startAddress, DWORD regionSize) {
-    const auto reelAddress = resolve_addresses(kAxiomReelDurationCandidate, startAddress, regionSize);
+    const auto reelAddress = resolve_addresses(kAxiomReelDurationCandidate, std::size(kAxiomReelDurationCandidate), startAddress, regionSize);
     if (!reelAddress) {
         Log("ReelDuration address not resolved");
     }
@@ -397,7 +397,7 @@ static bool resolve_reel_duration(std::byte* startAddress, DWORD regionSize) {
 }
 
 static bool resolve_propell_duration(std::byte* startAddress, DWORD regionSize) {
-    const auto propellAddress = resolve_addresses(kAxiomPropellDurationCandidate, startAddress, regionSize);
+    const auto propellAddress = resolve_addresses(kAxiomPropellDurationCandidate, std::size(kAxiomPropellDurationCandidate), startAddress, regionSize);
     if (!propellAddress) {
         Log("PropellDuration address not resolved");
     }
