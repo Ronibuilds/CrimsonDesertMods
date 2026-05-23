@@ -391,6 +391,7 @@ static bool resolve_reel_duration(std::byte* startAddress, DWORD regionSize) {
                 ss.str("");
                 ss << "ReelDuration pattern found but byte check failed. Expected 0x76 0x43, found 0x" << std::hex << *(uint8_t*)reelAddress << " 0x" << *(uint8_t*)(reelAddress + 1) << ". Address may be incorrect.";
                 Log(ss.str());
+                return false;
             }
             g_pReelDuration = reinterpret_cast<uint8_t*>(reelAddress);
             ss.str("");
@@ -417,6 +418,7 @@ static bool resolve_propell_duration(std::byte* startAddress, DWORD regionSize) 
                 std::stringstream ss;
                 ss << "PropellDuration pattern found but byte check failed. Expected 0x76 0x06, found 0x" << std::hex << *(uint8_t*)propellAddress << " 0x" << *(uint8_t*)(propellAddress + 1) << ". Address may be incorrect.";
                 Log(ss.str());
+                return false;
             }
             g_pPropellDuration = reinterpret_cast<uint8_t*>(propellAddress);
             std::stringstream ss;
