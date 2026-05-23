@@ -269,9 +269,9 @@ static uintptr_t find_pattern(const std::byte* base, std::size_t size, const cha
 }
 
 static uintptr_t resolve_addresses(const AddressCandidate* candidates, size_t csize, const std::byte* base, std::size_t size) {
-    for (size_t i = 0; i < size; ++i)
+    for (size_t i = 0; i < csize; ++i)
     {
-		auto& c = candidates[i];
+        const auto& c = candidates[i];
         const uintptr_t hit = find_pattern(base, size, c.pattern);
         if (hit) {
             return hit + c.disp_offset;
