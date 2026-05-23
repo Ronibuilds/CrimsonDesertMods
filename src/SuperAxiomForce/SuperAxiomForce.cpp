@@ -256,7 +256,9 @@ static uintptr_t find_pattern(const std::byte* base, std::size_t size, const cha
     auto patternBytes = patternToByte(pattern);
     auto s = patternBytes.size();
     auto d = patternBytes.data();
-
+    if (s == 0 || s > regionSize) {
+        return 0;
+    }
     for (auto i = 0ul; i < regionSize - s; ++i) {
         bool found = true;
         for (auto j = 0ul; j < s; ++j) {
@@ -276,7 +278,12 @@ static uintptr_t resolve_addresses(const AddressCandidate* candidates, size_t cs
         const auto& c = candidates[i];
         const uintptr_t hit = find_pattern(base, size, c.pattern);
         if (hit) {
-            return hit + c.disp_offset;
+            if (c.mode == ResolveMode::RipRelative) {
+				return hit + c.instr_end_offset + *reinterpret_cast<int32_t*>(hit + c.disp_offset);
+            }
+            else {
+                return hit + c.disp_offset;
+            }
         }
         else {
             std::stringstream ss;
