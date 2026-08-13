@@ -23,6 +23,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 #include <psapi.h>
 #include <Xinput.h>
 #include <atomic>
@@ -42,6 +44,7 @@ static SharedPlayerBase g_sharedPlayerBase;
 
 // Global initialization guard to prevent double-initialization
 static std::atomic<bool> g_isInitialized{ false };
+static HANDLE g_processInitMutex = nullptr;
 
 // SafetyHook for proper hook chaining (compatibility with other mods)
 #include "safetyhook.hpp"
@@ -209,6 +212,8 @@ static int   g_aerialRollRampDownMs = 600;     // Time to ramp down (ms)
 static uintptr_t                g_playerBase = 0;
 // Captured from PosHookCallback (ctx.rbx = player entity, confirmed by diagnostic)
 static std::atomic<uintptr_t>  g_capturedPlayerBase{ 0 };
+static std::atomic<uint32_t>   g_posHookValidSamples{ 0 };
+static std::atomic<bool>       g_loggedPosHookFallback{ false };
 static std::atomic<bool>  g_ascendBoostActive{ false };
 static std::atomic<bool>  g_descendBoostActive{ false };
 static std::atomic<bool>  g_horizontalBoostActive{ false };
@@ -613,10 +618,22 @@ static bool InstallVelHook(uint8_t* location) {
 //  Uses SafetyHook for compatibility with other mods
 // ============================================================
 static void PosHookCallback(safetyhook::Context& ctx) {
-    if (ctx.rbx > 0x100000ULL)
-        g_capturedPlayerBase.store(ctx.rbx);
-
     __try {
+        // Patch 1.17 no longer contains the legacy player-pointer signature.
+        // The still-unique controlled-character position hook provides the same
+        // entity in RBX. Require repeated samples with a plausible velocity field
+        // before InputLoop is allowed to adopt it as the player base.
+        if (ctx.rbx > 0x100000ULL) {
+            const float candidateVelZ = *reinterpret_cast<float*>(ctx.rbx + VEL_Z_OFFSET);
+            if (std::isfinite(candidateVelZ) && std::fabs(candidateVelZ) < 500.0f) {
+                g_capturedPlayerBase.store(ctx.rbx);
+                uint32_t samples = g_posHookValidSamples.load(std::memory_order_relaxed);
+                if (samples < 1000) {
+                    g_posHookValidSamples.store(samples + 1, std::memory_order_relaxed);
+                }
+            }
+        }
+
         // r13 contains position pointer
         uintptr_t r13_ptr = ctx.r13;
 
@@ -858,7 +875,7 @@ static void InputLoop() {
         // Update player base — prefer PosHook capture (ctx.rbx), fall back to shared memory.
         {
             uintptr_t captured = g_capturedPlayerBase.load();
-            if (captured != 0) {
+            if (captured != 0 && g_posHookValidSamples.load(std::memory_order_relaxed) >= 8) {
                 if (g_lastSeenPlayerBase != 0 && captured != g_lastSeenPlayerBase) {
                     // Player entity changed (save/load) — reset all flight state.
                     g_playerBaseChangeMs = GetTickCount64();
@@ -872,6 +889,14 @@ static void InputLoop() {
                 g_lastSeenPlayerBase = captured;
                 g_playerBase = captured;
                 g_sharedPlayerBase.UpdatePlayerBase(captured);
+
+                if (!g_loggedPosHookFallback.exchange(true)) {
+                    std::ostringstream message;
+                    message << kModBaseName
+                            << ": patch 1.17 fallback detection active; player base verified at 0x"
+                            << std::hex << std::uppercase << captured;
+                    Log(message.str());
+                }
             } else if (!g_sharedPlayerBase.IsHookOwner()) {
                 uintptr_t sharedBase = g_sharedPlayerBase.GetPlayerBase();
                 if (sharedBase != 0 && sharedBase != g_playerBase)
@@ -1324,6 +1349,18 @@ static void InputLoop() {
 //  ENTRY POINT
 // ============================================================
 static void ModMain() {
+    // Some ASI loader chains can map the same plugin more than once under
+    // separate module handles. A C++ static guard is per mapping, so use a
+    // process-scoped named mutex as the final guard against duplicate hooks.
+    char initMutexName[96]{};
+    sprintf_s(initMutexName, "Local\\EnhancedFlight_Init_%lu", GetCurrentProcessId());
+    HANDLE initMutex = CreateMutexA(nullptr, FALSE, initMutexName);
+    if (initMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (initMutex != nullptr) CloseHandle(initMutex);
+        return;
+    }
+    g_processInitMutex = initMutex;
+
     Log(std::string(kModBaseName) + ": waiting for game to load...");
     Sleep(15000);
 
@@ -1379,7 +1416,7 @@ static void ModMain() {
         }
 
         if (!velLoc) {
-            Log(std::string(kModBaseName) + ": ERROR - game version not supported, flight detection inactive.");
+            Log(std::string(kModBaseName) + ": legacy detection signature unavailable; waiting for patch 1.17 position-hook fallback.");
         } else {
             velLoc += hookOffset;
             if (InstallVelHook(velLoc)) {
