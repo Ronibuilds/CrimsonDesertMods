@@ -185,6 +185,12 @@ Use alongside an **infinite stamina mod** — without it, flight is still limite
 
 ## Changelog
 
+### v3.2.1 Community Patch (game patch 1.17)
+- Fixed: Flight detection now falls back to the still-unique controlled-character position hook when the legacy player-pointer signature is unavailable
+- Added: Repeated velocity-field validation before accepting a fallback player pointer
+- Added: Process-level duplicate initialization guard for layered ASI loader setups
+- Tested: Steam game patch 1.17 with ascend, descend, horizontal boost, and aerial-roll boost
+
 ### v3.0
 - Fixed: Fast-fall dive input bug — boosts now correctly gated during dives
 - Changed: INI cleaned up; only active features present
