@@ -85,6 +85,10 @@ static inline T Clamp(T value, T lo, T hi) {
 #define DS_BTN_R3        0x8000   // 32768
 #define DS_BTN_PS        0x10000  // PS button (in separate byte)
 
+// DualShock 4 (DS4) PIDs — same Sony VID 0x054C; covers real DS4 and ViGEm virtual DS4 (Sunshine/Moonlight, DS4Windows)
+#define DS4_PID_V1 0x05C4  // DualShock 4 v1
+#define DS4_PID_V2 0x09CC  // DualShock 4 v2
+
 // DualSense input report structure (USB mode - Report ID 0x01)
 #pragma pack(push, 1)
 struct DualSenseInputUSB {
@@ -123,6 +127,7 @@ struct DualSenseState {
     HANDLE deviceHandle;
     bool isConnected;
     bool isBluetooth;
+    bool isDS4;               // DualShock 4 (incl. ViGEm virtual) — different report layout
     uint32_t buttons;         // Combined button state
     uint8_t leftTrigger;
     uint8_t rightTrigger;
@@ -132,7 +137,7 @@ struct DualSenseState {
     uint8_t rightStickY;
 };
 
-static DualSenseState g_dualSense = { INVALID_HANDLE_VALUE, false, false, 0, 0, 0, 128, 128, 128, 128 };
+static DualSenseState g_dualSense = { INVALID_HANDLE_VALUE, false, false, false, 0, 0, 0, 128, 128, 128, 128 };
 
 // ============================================================
 //  VELOCITY OFFSETS
@@ -311,12 +316,15 @@ static bool DualSense_Initialize() {
                 attrib.Size = sizeof(HIDD_ATTRIBUTES);
 
                 if (HidD_GetAttributes(hDevice, &attrib)) {
-                    // Check if this is a DualSense or DualSense Edge
+                    // Check if this is a DualSense, DualSense Edge or DualShock 4
+                    bool isDS4 = (attrib.VendorID == DUALSENSE_VID &&
+                        (attrib.ProductID == DS4_PID_V1 || attrib.ProductID == DS4_PID_V2));
                     if (attrib.VendorID == DUALSENSE_VID &&
-                        (attrib.ProductID == DUALSENSE_PID || attrib.ProductID == DUALSENSE_EDGE_PID)) {
+                        (attrib.ProductID == DUALSENSE_PID || attrib.ProductID == DUALSENSE_EDGE_PID || isDS4)) {
 
                         g_dualSense.deviceHandle = hDevice;
                         g_dualSense.isConnected = true;
+                        g_dualSense.isDS4 = isDS4;
 
                         // Determine connection type by checking preparsed data
                         PHIDP_PREPARSED_DATA preparsedData;
@@ -332,7 +340,7 @@ static bool DualSense_Initialize() {
                         free(detailData);
                         SetupDiDestroyDeviceInfoList(deviceInfoSet);
 
-                        Log(std::string(kModBaseName) + ": DualSense controller detected (" +
+                        Log(std::string(kModBaseName) + (g_dualSense.isDS4 ? ": DualShock 4 controller detected (" : ": DualSense controller detected (") +
                             (g_dualSense.isBluetooth ? "Bluetooth" : "USB") + ")");
                         return true;
                     }
@@ -393,6 +401,24 @@ static bool DualSense_ReadInput() {
 
     if (bytesRead == 0) {
         return false;
+    }
+
+    // DualShock 4 reports (real DS4 or ViGEm virtual from Sunshine/Moonlight/DS4Windows)
+    // USB/ViGEm (Report ID 0x01): [1-4] sticks, [5] dpad+face, [6] shoulders/options, [7] PS/touch, [8] L2, [9] R2
+    // Bluetooth (Report ID 0x11): same fields shifted by +2
+    if (g_dualSense.isDS4) {
+        size_t off = 0;
+        if (buffer[0] == 0x01 && bytesRead >= 10) off = 0;
+        else if (buffer[0] == 0x11 && bytesRead >= 12) off = 2;
+        else return false;
+        g_dualSense.leftStickX  = buffer[1 + off];
+        g_dualSense.leftStickY  = buffer[2 + off];
+        g_dualSense.rightStickX = buffer[3 + off];
+        g_dualSense.rightStickY = buffer[4 + off];
+        g_dualSense.buttons = DualSense_ParseButtons(&buffer[5 + off]);
+        g_dualSense.leftTrigger  = buffer[8 + off];
+        g_dualSense.rightTrigger = buffer[9 + off];
+        return true;
     }
 
     // Parse based on connection type
@@ -735,6 +761,45 @@ static bool IsPlayerInFlight(ULONGLONG nowMs) {
         if (velZ != velZ || velZ > 500.0f || velZ < -500.0f) return g_isInFlight.load();
 
         float absVelZ = std::fabs(velZ);
+
+        // ==== STRICT GLIDE-BAND FLIGHT DETECTION (replaces timer heuristics) ====
+        // Measured ground truth: real gliding clamps natural velZ to ≈ -2.0 permanently.
+        // Jumps, air attacks and falls pass through this band in ~0.3s max; only wings
+        // stay in it. Our boost never affects velZ (position-delta injection), so this
+        // stays valid while ascending/descending with the mod.
+        {
+            static ULONGLONG s_inBandSinceMs = 0;
+            static ULONGLONG s_lastBoostMs = 0;
+            bool inBandNow = (velZ >= -2.8f && velZ <= -0.5f);
+
+            // Our own boost injection can kick velZ out of the band for a few frames
+            // (engine position correction). Only reachable AFTER flight was confirmed,
+            // so this grace cannot be abused from a jump: keep the band timer alive
+            // while any boost is active and for 400ms after it stops.
+            bool anyBoost = (std::fabs(g_currentAscendVel.load()) > 0.5f ||
+                             std::fabs(g_currentDescendVel.load()) > 0.5f ||
+                             g_currentHorizontalMult.load() > 1.05f ||
+                             g_currentAerialMult.load() > 1.05f);
+            if (anyBoost) s_lastBoostMs = nowMs;
+            bool boostRecent = (s_lastBoostMs != 0) && ((nowMs - s_lastBoostMs) < 400ULL);
+
+            if (inBandNow || boostRecent) {
+                if (s_inBandSinceMs == 0) s_inBandSinceMs = nowMs;
+            } else {
+                s_inBandSinceMs = 0;
+            }
+            bool glideConfirmed = (s_inBandSinceMs != 0) && ((nowMs - s_inBandSinceMs) >= 500ULL);
+
+            // keep grounded bookkeeping alive for InputLoop's notActuallyGrounded
+            if (absVelZ <= g_groundedVelEpsilon) {
+                if (g_groundedSinceMs == 0) g_groundedSinceMs = nowMs;
+            } else {
+                g_groundedSinceMs = 0;
+            }
+
+            g_isInFlight.store(glideConfirmed);
+            return glideConfirmed;
+        }
 
         // Confirmed airborne when vertical velocity is clearly non-zero.
         if (absVelZ >= g_airborneVelThreshold) {
